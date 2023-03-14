@@ -21,26 +21,15 @@ phases:
   build:
     commands:
       - echo Build started on `date`
-      - |
-        if [[ "${GIT_BRANCH}" == "develop" ]]; then
-          echo Building the Docker image...          
-          docker build -t $IMAGE_REPO_NAME:$IMAGE_TAG .
-          docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
-          aws ssm put-parameter --name "/Ski_App/Image_Tag" --type "String" --value "${IMAGE_TAG}" --overwrite
-        elif [[ "${GIT_BRANCH}" == "main" ]]; then
-          EXISTING_IMAGE_TAG=$(aws ssm get-parameter --name "/Ski_App/Image_Tag" --output text --query Parameter.Value)
-          MANIFEST=$(aws ecr batch-get-image --repository-name $IMAGE_REPO_NAME --image-ids imageTag=$EXISTING_IMAGE_TAG --output json | jq --raw-output --join-output '.images[0].imageManifest')
-          aws ecr put-image --repository-name $IMAGE_REPO_NAME --image-tag $IMAGE_TAG --image-manifest "$MANIFEST"  
-        fi
+      - echo Building the Docker image...          
+      - docker build -t $IMAGE_REPO_NAME:$IMAGE_TAG .
+      - docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
   post_build:
     commands:
-      - |
-        if [[ "${GIT_BRANCH}" == "develop" ]]; then
-          echo Build completed on `date`
-          echo Pushing the Docker image...
-          docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
-        fi
-      - aws codebuild start-build --project-name "cd-automation" --region "us-west-2" --environment-variables-override name=GIT_BRANCH,value=$GIT_BRANCH,type=PLAINTEXT name=IMAGE_TAG,value=$IMAGE_TAG,type=PLAINTEXT
+      - echo Build completed on `date`
+      - echo Pushing the Docker image...
+      - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
+      #- aws codebuild start-build --project-name "cd-automation" --region "us-west-2" --environment-variables-override name=GIT_BRANCH,value=$GIT_BRANCH,type=PLAINTEXT name=IMAGE_TAG,value=$IMAGE_TAG,type=PLAINTEXT
 cache: 
   type: LOCAL
   modes: LOCAL_DOCKER_LAYER_CACHE
