@@ -15,6 +15,7 @@ phases:
     commands:
       - echo Setting up image tag
       - COMMIT_ID=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -b -8)
+      - echo $COMMIT_ID
       - echo $GIT_BRANCH
       - |
         if [[ "${GIT_BRANCH}" == "develop" ]]; then
