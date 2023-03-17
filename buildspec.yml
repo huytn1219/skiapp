@@ -29,7 +29,7 @@ phases:
       - echo Build completed on `date`
       - echo Pushing the Docker image...
       - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
-      #- aws codebuild start-build --project-name "cd-automation" --region "us-west-2" --environment-variables-override name=GIT_BRANCH,value=$GIT_BRANCH,type=PLAINTEXT name=IMAGE_TAG,value=$IMAGE_TAG,type=PLAINTEXT
+      - aws codebuild start-build --project-name "test" --region "us-west-2" --environment-variables-override name=GIT_BRANCH,value=main,type=PLAINTEXT name=IMAGE_TAG,value=$IMAGE_TAG,type=PLAINTEXT
 cache: 
   type: LOCAL
   modes: LOCAL_DOCKER_LAYER_CACHE
