@@ -2,9 +2,9 @@ version: 0.2
 env:
   shell: bash
   variables:
-    AWS_DEFAULT_REGION: "us-west-2"
-    IMAGE_REPO_NAME: "skiapp"
-    AWS_ACCOUNT_ID: "180287136233"
+    AWS_DEFAULT_REGION: $AWS_REGION 
+    IMAGE_REPO_NAME: $APP_REPO_NAME
+    AWS_ACCOUNT_ID: $AWS_ACCOUNT_ID
   exported-variables:
    - IMAGE_TAG
   
@@ -30,16 +30,6 @@ phases:
   post_build:
     commands:
       - echo ">>> build status $CODEBUILD_BUILD_SUCCEEDING "
-      - |
-        if [ ! -z "$CFN_RESPONSE_URL" ]; then
-          if [ "$CODEBUILD_BUILD_SUCCEEDING" -eq "1" ]
-          then
-            curl -X PUT -H 'Content-Type:' --data-binary '{"Status" : "SUCCESS","Reason" : "Creation Complete", "UniqueId" : "$CODEBUILD_BUILD_ID","Data" : "Creation complete"}' $CFN_RESPONSE_URL
-          else
-            curl -X PUT -H 'Content-Type:' --data-binary '{"Status" : "FAILURE","Reason" : "Creation Failed", "UniqueId" : "$CODEBUILD_BUILD_ID","Data" : "See Codebuild logs for details. $CODEBUILD_LOG_PATH"}' $CFN_RESPONSE_URL
-          fi
-        fi
-      #- aws codebuild start-build --project-name "test" --region "us-west-2" --environment-variables-override name=GIT_BRANCH,value=main,type=PLAINTEXT name=IMAGE_TAG,value=$IMAGE_TAG,type=PLAINTEXT
 cache: 
   type: LOCAL
   modes: LOCAL_DOCKER_LAYER_CACHE

@@ -3,6 +3,25 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: CloudFormation template with YAML - CodeBuild
 
 Parameters:
+  CodePipelineProjectName:
+    Description: CodePipeline CICD Project Name
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: ^[a-zA-Z][-a-zA-Z0-9]*$
+    Default: CodePipeline
+  CDRepoName:
+    Description: Name of the CodeCommit Infrarstructure repo
+    Type: String
+    Default: infra-skiapp
+  CodeCommitRepositoryName:
+    Description: Name of the CodeCommit Application Repo
+    Type: String
+    Default: skiapp
+  CodeCommitRepositoryBranchName:
+    Description: Branch Nname of the CodeCommit Application Repo
+    Type: String
+    Default: main
   StackName:
     Description: Build Project CI/CD EKS
     Type: String
@@ -17,6 +36,13 @@ Parameters:
     MaxLength: 255
     AllowedPattern: ^[a-zA-Z][-a-zA-Z0-9]*$
     Default: CodeBuildCI
+  CodeBuildCDProjectName:
+    Description: CI CodeBuild Project Name
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: ^[a-zA-Z][-a-zA-Z0-9]*$
+    Default: CodeBuildCD
   CodeBuildCIBackendProjectName:
     Description: CD CodeBuild Project Name
     Type: String
@@ -24,32 +50,89 @@ Parameters:
     MaxLength: 255
     AllowedPattern: ^[a-zA-Z][-a-zA-Z0-9]*$
     Default: CodeBuildCD
+  S3BucketName:
+    Description: Type of this BucketName.
+    Type: String
+    Default: codepipeline-cicd-eks
 
 Resources:
+  CodePipelineProject:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn: S3BucketForCodePipeline
+    Properties:
+      Name: CodePipeline-CICD-EKS
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      Stages:
+        - Name: SourceStage
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: "1"
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                RepositoryName: !Ref CodeCommitRepositoryName 
+                BranchName: !Ref CodeCommitRepositoryBranchName  
+              RunOrder: 1
+        - Name: CIStage
+          Actions:
+            - Name: BuildAction
+              Namespace: "SourceVariables"
+              InputArtifacts:
+                - Name: SourceOutput
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              OutputArtifacts:
+                - Name: BuildCIOutput
+              Configuration:
+                ProjectName: !Ref CodeBuildCI
+        - Name: CDStage
+          Actions:
+            - Name: CDAction
+              InputArtifacts:
+                - Name: BuildCIOutput
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: "1"
+              Configuration:
+                FunctionName: !Ref TriggerBuildLambda
+                UserParameters: '#{SourceVariables.IMAGE_TAG}'
+      ArtifactStore:
+        Location: !Ref S3BucketName
+        Type: S3
+
   CodeBuildCI:
     Type: AWS::CodeBuild::Project
     Properties:
       Name: !Ref CodeBuildCIProjectName
       Source:
-        Type: GITHUB
-        Location: https://github.com/huytn1219/skiapp.git
-        GitCloneDepth: 1
+        Type: CODECOMMIT
+        Location: !Sub https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${CodeCommitRepositoryName}
         BuildSpec: ./buildspec.yml
-      Triggers:
-        Webhook: true
-        FilterGroups:
-          - - Type: EVENT
-              Pattern: PUSH
-            - Type: HEAD_REF
-              Pattern: ^refs/heads/master
+        GitCloneDepth: 1
       Environment:
         Type: LINUX_CONTAINER
         Image: aws/codebuild/standard:6.0
         ComputeType: BUILD_GENERAL1_SMALL
         PrivilegedMode: true
         EnvironmentVariables:
-          - Name: CFN_RESPONSE_URL
-            Value: !Ref WaitForStackCreationHandle
+          - Name: AWS_REGION
+            Type: PLAINTEXT
+            Value: !Sub ${AWS::Region}
+          - Name: APP_REPO_NAME
+            Type: PLAINTEXT
+            Value: !Ref CodeCommitRepositoryName
+          - Name: AWS_ACCOUNT_ID
+            Type: PLAINTEXT
+            Value: !Sub ${AWS::AccountId}
       ServiceRole: !Ref CodeBuildCIServiceRole
       Artifacts:
         Type: NO_ARTIFACTS
@@ -57,9 +140,81 @@ Resources:
         CloudWatchLogs:
           Status: ENABLED
           GroupName: !Sub ${CodeBuildCIProjectName}-CloudWatchLogs-BuildLogGroup-Name
+
+  CodeBuildCD:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref CodeBuildCDProjectName
+      Source:
+        Type: CODECOMMIT
+        Location: !Sub https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${CDRepoName}
+        GitCloneDepth: 1
+        BuildSpec: ./buildspec.yml
+      SourceVersion: !Sub refs/heads/${CodeCommitRepositoryBranchName}
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: public.ecr.aws/h6p5n3w3/kustomize:latest
+        ComputeType: BUILD_GENERAL1_SMALL
+      ServiceRole: !Ref CodeBuildCDServiceRole
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Sub ${CodeBuildCIProjectName}-CloudWatchLogs-BuildLogGroup-Name
   
-  WaitForStackCreationHandle:
-    Type: AWS::CloudFormation::WaitConditionHandle
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${CodePipelineProjectName}-codepipeline-base-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - s3:*
+                  - sns:*
+                  - cloudformation:*
+                Resource: "*"
+                Effect: Allow
+              - Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: "*"
+                Effect: Allow
+              - Action:
+                  - iam:PassRole
+                Resource: "*"
+                Effect: Allow
+                Condition:
+                  StringEqualsIfExists:
+                    iam:PassedToService:
+                      - cloudformation.amazonaws.com
+              - Action:
+                  - lambda:InvokeFunction
+                  - lambda:ListFunctions
+                Resource: "*"
+                Effect: Allow
+              - Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:UploadArchive
+                  - codecommit:CancelUploadArchive
+                Resource: "*"
+                Effect: Allow
+
   
   TriggerBuildLambdaIamRole:
     Type: AWS::IAM::Role
@@ -83,7 +238,12 @@ Resources:
               - Effect: Allow
                 Action:
                 - codebuild:*
-                Resource: !GetAtt CodeBuildCI.Arn
+                Resource: "*" 
+              - Effect: Allow
+                Action:
+                - codepipeline:PutJobSuccessResult
+                - codepipeline:PutJobFailureResult
+                Resource: "*"
 
   TriggerBuildLambda:
     Type: AWS::Lambda::Function
@@ -91,6 +251,9 @@ Resources:
       Description: function to retrieve User info
       Handler: index.handler
       Role: !GetAtt TriggerBuildLambdaIamRole.Arn
+      Environment:
+        Variables:
+          CDProjectName: !Ref CodeBuildCD
       Runtime: python3.7
       Code:
         ZipFile: |
@@ -99,86 +262,70 @@ Resources:
           import sys
           import json
           import urllib3
+          import os
 
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
-          http = urllib3.PoolManager()
+          print('Loading function')
 
+          cd_project_name = os.environ.get('CDProjectName')
+          code_pipeline = boto3.client('codepipeline')
           codebuild_client = boto3.client('codebuild')
 
-          # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-lambda-function-code-cfnresponsemodule.html
+          def put_job_success(job):
+            """Notify CodePipeline of a successful job
+            
+            Args:
+                job: The CodePipeline job ID
+                message: A message to be logged relating to the job status
+                
+            Raises:
+                Exception: Any exception thrown by .put_job_success_result()
+            
+            """
+            print('Putting job success')
+            code_pipeline.put_job_success_result(jobId=job)
+
+          def put_job_failure(job, message):
+            """Notify CodePipeline of a failed job
+            
+            Args:
+                job: The CodePipeline job ID
+                message: A message to be logged relating to the job status
+                
+            Raises:
+                Exception: Any exception thrown by .put_job_failure_result()
+            
+            """
+            print('Putting job failure')
+            print(message)
+            code_pipeline.put_job_failure_result(jobId=job, failureDetails={'message': message, 'type': 'JobFailed'})
+
           def handler(event, context):
-              logger.info('Incoming Event: {0}'.format(event))
-              response = {}
-              response['PhysicalResourceId'] = 'hardcodedphyscialid'
-              response['StackId'] = event['StackId']
-              response['RequestId'] = event['RequestId']
-              response['LogicalResourceId'] = event['LogicalResourceId']
-              cfn_response_url = event['ResponseURL']
+            job_id = event['CodePipeline.job']['id']
+            job_data = event['CodePipeline.job']['data']
+            image_tag = job_data['actionConfiguration']['configuration']['UserParameters']
 
-              if event['RequestType'] == 'Delete':
-                response['Status'] = 'SUCCESS'
-
-              elif event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
-
-                try:
-                  codebuild_client.start_build(projectName='test',environmentVariablesOverride=[
-                                     {
-                                        'name': 'GIT_BRANCH',
-                                        'value': 'main',
-                                        'type': 'PLAINTEXT'
-                                      },
-                                      {
-                                        'name': 'IMAGE_TAG',
-                                        'value': '$IMAGE_TAG',
-                                        'type': 'PLAINTEXT' 
-                                      },
-                                           ])
-                  response['Status'] = 'SUCCESS'
-
-                except:
-                  logging.error('Error: {0}'.format(sys.exc_info() ))
-                  response['Status'] = 'FAILED'
-
-              http.request('PUT', cfn_response_url, body=json.dumps(response).encode('utf-8'), headers={'Content-Type': 'application/json'})
-              return 'Done'
-
- # SampleCloudFormationCodeBuildBackend:
-    #Type: AWS::CodeBuild::Project
-    #Properties:
-      #Name: !Ref CodeBuildCIBackendProjectName
-      #Source:
-        #Type: GITHUB
-        #Location: https://github.com/debugroom/sample-aws-cloudformation.git
-        #GitCloneDepth: 1
-        #BuildSpec: backend-app/src/main/codebuild/dev/buildspec.yml
-      #Triggers:
-        #Webhook: true
-        #FilterGroups:
-          #- - Type: EVENT
-              #Pattern: PUSH
-            #- Type: HEAD_REF
-##              Pattern: ^refs/heads/feature/.*
-              #Pattern: ^refs/heads/master
-      #Environment:
-        #Type: LINUX_CONTAINER
-        #Image: aws/codebuild/standard:2.0
-        #ComputeType: BUILD_GENERAL1_SMALL
-      #ServiceRole: !Ref SampleCloudFormationCodeBuildBackendServiceRole
-      #VpcConfig:
-        #VpcId:
-          #Fn::ImportValue: !Sub ${StackName}-VPCID
-        #Subnets:
-          #- Fn::ImportValue: !Sub ${StackName}-PrivateSubnet1
-          #- Fn::ImportValue: !Sub ${StackName}-PrivateSubnet2
-        #SecurityGroupIds:
-          #- Fn::ImportValue: !Sub ${StackName}-SecurityGroupCodeBuild
-      #Artifacts:
-        #Type: NO_ARTIFACTS
-      #LogsConfig:
-        #CloudWatchLogs:
-          #Status: ENABLED
-          #GroupName: !Sub ${CodeBuildCIBackendProjectName}-CloudWatchLogs-BuildLogGroup-Name
+            try:
+              codebuild_client.start_build(
+                      projectName=str(cd_project_name),
+                      environmentVariablesOverride=[
+                      {
+                        'name': 'GIT_BRANCH',
+                        'value': 'main',
+                        'type': 'PLAINTEXT'
+                      },
+                      {
+                        'name': 'IMAGE_TAG',
+                        'value': image_tag,
+                        'type': 'PLAINTEXT'
+                      }])
+              put_job_success(job_id)
+            except Exception as e:
+              print('Function failed due to exception.') 
+              print(e)
+              put_job_failure(job_id, 'Function exception: ' + str(e))
+            
+            print('Function complete.') 
+            return "Complete."
 
 
   CodeBuildCIServiceRole:
@@ -218,6 +365,7 @@ Resources:
                   - ecr:UploadLayerPart
                   - ecr:CompleteLayerUpload
                   - ecr:PutImage
+                  - s3:GetObject
               - Effect: Allow
                 Resource:
                   - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${CodeBuildCIProjectName}-CloudWatchLogs-BuildLogGroup-Name
@@ -226,91 +374,65 @@ Resources:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
+              - Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:UploadArchive
+                  - codecommit:CancelUploadArchive
+                Resource: "*"
+                Effect: Allow
 
-#  SampleCloudFormationCodeBuildBackendServiceRole:
-    #Type: AWS::IAM::Role
-    #Properties:
-      #Path: /
-      #AssumeRolePolicyDocument:
-        #Statement:
-          #- Effect: Allow
-            #Principal:
-              #Service:
-                #- codebuild.amazonaws.com
-            #Action:
-              #- sts:AssumeRole
-      #Policies:
-        #- PolicyName: !Sub ${CodeBuildCIBackendProjectName}-codebuild-base-policy
-          #PolicyDocument:
-            #Version: 2012-10-17
-            #Statement:
-              #- Effect: Allow
-                #Resource:
-                  #- !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${CodeBuildCIBackendProjectName}-CloudWatchLogs-BuildLogGroup-Name
-                  #- !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${CodeBuildCIBackendProjectName}-CloudWatchLogs-BuildLogGroup-Name:*
-                #Action:
-                  #- logs:CreateLogGroup
-                  #- logs:CreateLogStream
-                  #- logs:PutLogEvents
-              #- Effect: Allow
-                #Resource:
-                  #- !Sub arn:aws:s3:::codepipeline-${AWS::Region}-*
-                #Action:
-                  #- s3:PutObject
-                  #- s3:GetObject
-                  #- s3:GetObjectVersion
-                  #- s3:GetBucketAcl
-                  #- s3:GetBucketLocation
-        #- PolicyName: !Sub ${CodeBuildCIBackendProjectName}-codebuild-vpc-policy
-          #PolicyDocument:
-            #Version: 2012-10-17
-            #Statement:
-              #- Effect: Allow
-                #Resource:
-                  #- "*"
-                #Action:
-                  #- ec2:CreateNetworkInterface
-                  #- ec2:DescribeDhcpOptions
-                  #- ec2:DescribeNetworkInterfaces
-                  #- ec2:DeleteNetworkInterface
-                  #- ec2:DescribeSubnets
-                  #- ec2:DescribeSecurityGroups
-                  #- ec2:DescribeVpcs
-              #- Effect: Allow
-                #Resource:
-                  #- !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*
-                #Action:
-                  #- ec2:CreateNetworkInterfacePermission
-                #Condition:
-                  #StringEquals:
-                    #ec2:Subnet:
-                      #- Fn::ImportValue: !Sub ${StackName}-PrivateSubnet1Arn
-                      #- Fn::ImportValue: !Sub ${StackName}-PrivateSubnet2Arn
-                    #ec2:AuthorizedService: codebuild.amazonaws.com
-        #- PolicyName: !Sub ${CodeBuildCIBackendProjectName}-ssm-parameterstore-policy
-          #PolicyDocument:
-            #Version: 2012-10-17
-            #Statement:
-              #- Effect: Allow
-                #Resource:
-                  #- "*"
-                #Action:
-                  #- ssm:DescribeParameters
-              #- Effect: Allow
-                #Resource:
-                  #- !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*
-                #Action:
-                  #- ssm:GetParameters
+  CodeBuildCDServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${CodeBuildCDProjectName}-base-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource:
+                  - "*"
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+              - Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:UploadArchive
+                  - codecommit:CancelUploadArchive
+                  - codecommit:GitPull
+                  - codecommit:GitPush
+                Resource: "*"
+                Effect: Allow
+
+  S3BucketForCodePipeline:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${S3BucketName}
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
 
 Outputs:
   CodeBuildCI:
-    Description: CI CodeBuild Project for BFF
+    Description: CI CodeBuild Project
     Value: !Ref CodeBuildCI
     Export:
       Name: !Sub ${StackName}-CodeBuild
 
-#  SampleCloudFormationCodeBuildBackend:
-    #Description: CI CodeBuild Project for Backend
-    #Value: !Ref SampleCloudFormationCodeBuildBackend
-    #Export:
-      #Name: !Sub ${StackName}-CodeBuildBackend
